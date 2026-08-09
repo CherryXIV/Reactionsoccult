@@ -11526,7 +11526,7 @@ local tbl =
 					data = 
 					{
 						category = "Lua",
-						conditionLua = "return OCGUI.GetToggle(\"Msytic Skills\")",
+						conditionLua = "return OCGUI.GetToggle(\"Mystic Skills\")",
 						name = "Toggle",
 						uuid = "85fc5f4c-f677-695e-b820-0f32505fcee4",
 						version = 3,
