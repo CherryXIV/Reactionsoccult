@@ -14,7 +14,7 @@ local tbl =
 			eventType = 2,
 			loop = false,
 			mechanicTime = 0,
-			name = "[FTM] ===v357===",
+			name = "[FTM] ===v398===",
 			throttleTime = 0,
 			timeRange = false,
 			timelineIndex = 0,
@@ -199,6 +199,381 @@ if id == 47489 then
             end
             data.npDraws[entID] = { mode = "marker", shapes = shapes, text = text }
         end
+        -- Safe spots derive from landings alone; order arrives late.
+        local center = { x = 100.0, y = -724.0, z = 800.0 }
+        local function elemShort(elem)
+            if elem == "ice" then return "ICE" end
+            if elem == "thunder" then return "LTG" end
+            return "FIRE"
+        end
+        local SPELL = { ["1"] = "One", ["2"] = "Two", ["3"] = "Three", ["4"] = "Four" }
+        local CFULL = { N = "north", NE = "northeast", E = "east", SE = "southeast",
+                        S = "south", SW = "southwest", W = "west", NW = "northwest", MID = "middle" }
+        local function speakName(name)
+            if name == nil then return "unknown" end
+            local base, suff = string.match(name, "^(.+)-(%u+)$")
+            if suff == "OUT" then return "outside " .. (SPELL[base] or CFULL[base] or base) end
+            if suff == "IN" then return "inside " .. (SPELL[base] or CFULL[base] or base) end
+            if name == "B" or name == "D" then return "at " .. name end
+            if SPELL[name] ~= nil then return "under " .. SPELL[name] end
+            if name == "A" or name == "C" then return "under " .. name end
+            return CFULL[name] or name
+        end
+        local function movePhrase(p)
+            if string.sub(p, 1, 3) == "at " then return "to " .. string.sub(p, 4) end
+            return p
+        end
+        local function elemSources(elem)
+            local sources = {}
+            for eid, s in pairs(data.npSpots) do
+                if s.element == elem then
+                    sources[#sources + 1] = { x = s.x, z = s.z }
+                end
+            end
+            -- sets 2+ = Dark Current: no boss element copy
+            local inDC = (data.npSetN ~= nil and data.npSetN >= 2)
+                or (data.npDarkCurrentUntil ~= nil and Now() < data.npDarkCurrentUntil)
+            if not inDC then
+                sources[#sources + 1] = { x = center.x, z = center.z }
+            end
+            return sources
+        end
+        local function elemMargin(elem, sources, px, pz)
+            local margin = 28.5 - math.sqrt((px - center.x) ^ 2 + (pz - center.z) ^ 2)
+            for i = 1, #sources do
+                local dx = px - sources[i].x
+                local dz = pz - sources[i].z
+                local m
+                if elem == "fire" then
+                    -- AOE sizes + 0.5 pad (fire r18, ice cross 15x90).
+                    m = math.sqrt(dx * dx + dz * dz) - 18.5
+                elseif elem == "ice" then
+                    local ax = math.abs(dx)
+                    local az = math.abs(dz)
+                    local armA = math.max(ax - 8.0, az - 45.5)
+                    local armB = math.max(az - 8.0, ax - 45.5)
+                    m = math.min(armA, armB)
+                else
+                    local dist = math.sqrt(dx * dx + dz * dz)
+                    if dist >= 61 then
+                        m = dist - 61
+                    else
+                        local ang = math.atan2(dx, dz)
+                        local best = 10
+                        local diag = { math.pi / 4, 3 * math.pi / 4, -math.pi / 4, -3 * math.pi / 4 }
+                        for j = 1, 4 do
+                            local dd = math.abs(ang - diag[j])
+                            if dd > math.pi then dd = 2 * math.pi - dd end
+                            if dd < best then best = dd end
+                        end
+                        -- 45-degree full cone: 22.5 half-angle + 0.5 pad.
+                        m = (best - math.rad(23)) * math.max(dist, 1)
+                    end
+                end
+                if m < margin then margin = m end
+            end
+            return margin
+        end
+        local MARKS = { [0] = "A", [60] = "1", [90] = "B", [120] = "2", [180] = "C", [240] = "3", [270] = "D", [300] = "4" }
+        local function snap45(angDeg)
+            return (math.floor((angDeg + 22.5) / 45) * 45) % 360
+        end
+        -- names may come from live marks; positions never do
+        local function liveName(angDeg)
+            if Argus ~= nil and Argus.getWaymarkInfo ~= nil then
+                local names = { "A", "B", "C", "D", "1", "2", "3", "4" }
+                local dirAng = math.rad(angDeg)
+                local bestName, bestDd = nil, math.rad(35)
+                for wid = 1, 8 do
+                    local mx, my, mz, active = Argus.getWaymarkInfo(wid)
+                    if active == true and mx ~= nil then
+                        local dx, dz = mx - center.x, mz - center.z
+                        local wr = math.sqrt(dx * dx + dz * dz)
+                        if wr > 5 and wr < 35 then
+                            local mAng = math.atan2(dx, -dz)
+                            local dd = math.abs((mAng - dirAng + math.pi) % (2 * math.pi) - math.pi)
+                            if dd < bestDd then bestName, bestDd = names[wid], dd end
+                        end
+                    end
+                end
+                if bestName ~= nil then return bestName end
+            end
+            return nil
+        end
+        local function baseName(angDeg)
+            return liveName(angDeg) or MARKS[angDeg]
+        end
+        -- "in" = r14: closer to center sits inside the 45-degree head fans
+        local function markPos(angDeg, intent)
+            local useAng = angDeg
+            if intent == "out" then
+                -- heads sit on a 60-degree hexagon, OUT stands on 45-degree corners
+                useAng = (math.floor((angDeg + 22.5) / 45) * 45) % 360
+            end
+            local a = math.rad(useAng)
+            local rt = 17
+            if intent == "in" then rt = 14 elseif intent == "out" then rt = 22 end
+            return center.x + rt * math.sin(a), center.z - rt * math.cos(a)
+        end
+        local function angOf(x, z)
+            local a = math.deg(math.atan2(x - center.x, -(z - center.z))) % 360
+            return (math.floor((a + 30) / 60) % 6) * 60
+        end
+        data.npSolveSafe = function(elem)
+            local sources = elemSources(elem)
+            if #sources == 0 then return nil end
+            -- rule spots are margin-checked; unsafe ones fall through
+            local rc = data.npRuleCandidates(elem)
+            if rc ~= nil and #rc > 0 then
+                local best, bm = nil, nil
+                for i = 1, #rc do
+                    local m = elemMargin(elem, sources, rc[i].x, rc[i].z)
+                    if m >= 0.4 and (bm == nil or m > bm) then best, bm = rc[i], m end
+                end
+                if best ~= nil then return best.x, best.z, best.name end
+                d("[NP SafeDots] kanatan rule spot unsafe for " .. elem .. " - geometric fallback")
+            end
+            local cands = {}
+            -- head spots double as candidates (ice stands under a head)
+            for eid, s in pairs(data.npSpots) do
+                local mn = baseName(angOf(s.x, s.z))
+                cands[#cands + 1] = { x = s.x, z = s.z, name = mn or data.npMarkName(s.x, s.z), bonus = 0.75 }
+            end
+            local compass = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" }
+            for i = 0, 7 do
+                local ang = i * math.pi / 4
+                -- World north is -z; +x is east.
+                cands[#cands + 1] = { x = center.x + 20 * math.sin(ang), z = center.z - 20 * math.cos(ang), name = compass[i + 1], bonus = 0 }
+                cands[#cands + 1] = { x = center.x + 10 * math.sin(ang), z = center.z - 10 * math.cos(ang), name = compass[i + 1] .. "-IN", bonus = 0 }
+            end
+            cands[#cands + 1] = { x = center.x, z = center.z, name = "MID", bonus = 0.25 }
+            local best, bestScore = nil, nil
+            for i = 1, #cands do
+                local c = cands[i]
+                local m = elemMargin(elem, sources, c.x, c.z)
+                if m >= 0.4 then
+                    local score = m + c.bonus
+                    if bestScore == nil or score > bestScore then best, bestScore = c, score end
+                end
+            end
+            if best ~= nil then return best.x, best.z, best.name end
+            d("[NP SafeDots] no waymark/compass pocket for " .. elem .. " - grid fallback")
+            local bx, bz, bm = nil, nil, 0.5
+            local radii = { 0, 5, 10, 15, 20, 24 }
+            for ri = 1, #radii do
+                local r = radii[ri]
+                local steps = r == 0 and 1 or 16
+                for si = 0, steps - 1 do
+                    local ang = si * (2 * math.pi / 16)
+                    local px = center.x + r * math.sin(ang)
+                    local pz = center.z + r * math.cos(ang)
+                    local m = elemMargin(elem, sources, px, pz)
+                    if m > bm then bx, bz, bm = px, pz, m end
+                end
+            end
+            if bx == nil then return nil end
+            return bx, bz, data.npMarkName(bx, bz)
+        end
+        data.npMarkName = function(px, pz)
+            if Argus ~= nil and Argus.getWaymarkInfo ~= nil then
+                -- id->name mapping assumed; compass fallback below
+                local names = { "A", "B", "C", "D", "1", "2", "3", "4" }
+                local bestName, bestD = nil, 6
+                for wid = 1, 8 do
+                    local mx, my, mz, active = Argus.getWaymarkInfo(wid)
+                    if active == true and mx ~= nil then
+                        local dd = math.sqrt((mx - px) ^ 2 + (mz - pz) ^ 2)
+                        if dd < bestD then bestName, bestD = names[wid], dd end
+                    end
+                end
+                if bestName ~= nil then return bestName end
+            end
+            local compass = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" }
+            local ang = math.deg(math.atan2(px - center.x, -(pz - center.z))) % 360
+            return compass[math.floor((ang + 22.5) / 45) % 8 + 1]
+        end
+        -- assumed marker layout: A=N C=S, 1-4 on the number spots, B=E D=W
+        data.npRuleCandidates = function(elem)
+            local a = {}
+            local spotByAng = {}
+            for eid, s in pairs(data.npSpots) do
+                local ad = angOf(s.x, s.z)
+                spotByAng[ad] = s
+                if s.element == elem then a[#a + 1] = ad end
+            end
+            if #a ~= 2 then return nil end
+            local diff = math.abs(a[1] - a[2])
+            if diff > 180 then diff = 360 - diff end
+            local diagonal = diff == 180
+            local function isNum(ad) return ad ~= 0 and ad ~= 180 end
+            local out = {}
+            if elem == "ice" then
+                local num
+                if isNum(a[1]) and not isNum(a[2]) then num = a[1]
+                elseif isNum(a[2]) and not isNum(a[1]) then num = a[2] end
+                if num == nil then return nil end
+                local inDC = (data.npSetN ~= nil and data.npSetN >= 2)
+                    or (data.npDarkCurrentUntil ~= nil and Now() < data.npDarkCurrentUntil)
+                if inDC then
+                    local ang = math.sin(math.rad(num)) > 0 and 270 or 90
+                    local x, z = markPos(ang, "at")
+                    out[1] = { x = x, z = z, name = baseName(ang) }
+                else
+                    local opp = (num + 180) % 360
+                    local s = spotByAng[opp]
+                    local x, z
+                    if s ~= nil then x, z = s.x, s.z else x, z = markPos(opp, "at") end
+                    out[1] = { x = x, z = z, name = baseName(opp) }
+                end
+            elseif elem == "thunder" then
+                if diagonal then
+                    local bx, bz = markPos(90, "in")
+                    local dx2, dz2 = markPos(270, "in")
+                    out[1] = { x = bx, z = bz, name = baseName(90) .. "-IN" }
+                    out[2] = { x = dx2, z = dz2, name = baseName(270) .. "-IN" }
+                else
+                    local card
+                    if not isNum(a[1]) then card = a[1] elseif not isNum(a[2]) then card = a[2] end
+                    if card == nil then return nil end
+                    local opp = (card + 180) % 360
+                    local x, z = markPos(opp, "in")
+                    out[1] = { x = x, z = z, name = baseName(opp) .. "-IN" }
+                end
+            else -- fire
+                local nums = { [60] = true, [120] = true, [240] = true, [300] = true }
+                if diagonal and isNum(a[1]) and isNum(a[2]) then
+                    nums[a[1]] = nil
+                    nums[a[2]] = nil
+                    for ang in pairs(nums) do
+                        local x, z = markPos(ang, "out")
+                        out[#out + 1] = { x = x, z = z, name = (liveName(snap45(ang)) or MARKS[ang]) .. "-OUT" }
+                    end
+                elseif not diagonal then
+                    local card, num
+                    if isNum(a[1]) then num = a[1] else card = a[1] end
+                    if isNum(a[2]) then num = a[2] else card = a[2] end
+                    if card == nil or num == nil then return nil end
+                    local opp = (card + 180) % 360
+                    local adj = { (opp + 60) % 360, (opp - 60) % 360 }
+                    for i = 1, 2 do
+                        if adj[i] ~= num then
+                            local x, z = markPos(adj[i], "out")
+                            out[#out + 1] = { x = x, z = z, name = (liveName(snap45(adj[i])) or MARKS[adj[i]]) .. "-OUT" }
+                        end
+                    end
+                else
+                    return nil
+                end
+            end
+            return out
+        end
+        data.npWipeDot = function(elem)
+            local rec = data.npSafeDots ~= nil and data.npSafeDots[elem] or nil
+            if rec == nil then return end
+            for i = 1, #rec.shapes do Argus.deleteTimedShape(rec.shapes[i]) end
+            if rec.text ~= nil and AnyoneCore ~= nil and AnyoneCore.removeTimedWorldText ~= nil then
+                AnyoneCore.removeTimedWorldText(rec.text)
+            end
+            data.npSafeDots[elem] = nil
+        end
+        data.npSafeDotDraw = function(elem)
+            data.npSafeDots = data.npSafeDots or {}
+            -- never move an announced dot
+            local nSpots = 0
+            for eid in pairs(data.npSpots) do nSpots = nSpots + 1 end
+            local old = data.npSafeDots[elem]
+            local sx, sz, name
+            if old ~= nil and old.pinned then
+                sx, sz, name = old.x, old.z, old.name
+            else
+                sx, sz, name = data.npSolveSafe(elem)
+            end
+            if sx == nil then
+                d("[NP SafeDots] no safe pocket for " .. elem)
+                return
+            end
+            local pinned = (old ~= nil and old.pinned) or nSpots >= 6
+            data.npWipeDot(elem)
+            local n0 = data.npDotOrder ~= nil and data.npDotOrder[elem] or nil
+            local rr = (n0 == nil or n0 == 1) and 1.8 or 1.2
+            local dr = TensorCore.getStaticDrawer(fillColor(elem, 0.8), 2)
+            local shapes = { dr:addTimedCircle(40000, sx, center.y, sz, rr) }
+            local n = data.npDotOrder ~= nil and data.npDotOrder[elem] or nil
+            local txt = (n ~= nil and (n .. ". ") or "") .. elemShort(elem)
+            local text
+            if AnyoneCore ~= nil and AnyoneCore.addTimedWorldText ~= nil then
+                text = AnyoneCore.addTimedWorldText(40000, txt, { x = sx, y = center.y + 2.2, z = sz }, fillColor(elem, 1.0), true, 2.0)
+            end
+            data.npSafeDots[elem] = { shapes = shapes, text = text, name = name, x = sx, z = sz, pinned = pinned }
+            -- names outlive wiped dots (route call may come later)
+            data.npDotNames = data.npDotNames or {}
+            data.npDotNames[elem] = name
+        end
+        data.npRedrawDots = function()
+            if data.npSafeDots == nil then return end
+            local elems = {}
+            for elem in pairs(data.npSafeDots) do elems[#elems + 1] = elem end
+            for i = 1, #elems do data.npSafeDotDraw(elems[i]) end
+        end
+        data.npStampDot = function(elem, n)
+            data.npDotOrder = data.npDotOrder or {}
+            if data.npDotOrder[elem] ~= nil then return end
+            data.npDotOrder[elem] = n
+            if data.npSafeDots ~= nil and data.npSafeDots[elem] ~= nil then
+                data.npSafeDotDraw(elem)
+            end
+            if n == 1 and data.npDotNames ~= nil and data.npDotNames[elem] ~= nil then
+                if AnyoneCore ~= nil and AnyoneCore.Shotcall ~= nil then
+                    AnyoneCore.Shotcall("Start " .. speakName(data.npDotNames[elem]), true, 6)
+                end
+            end
+            -- two known = third forced
+            local elems = { "fire", "ice", "thunder" }
+            local stamped, lastElem = 0, nil
+            for i = 1, 3 do
+                if data.npDotOrder[elems[i]] ~= nil then
+                    stamped = stamped + 1
+                else
+                    lastElem = elems[i]
+                end
+            end
+            if stamped == 2 and lastElem ~= nil then
+                data.npDotOrder[lastElem] = 3
+                if data.npSafeDots ~= nil and data.npSafeDots[lastElem] ~= nil then
+                    data.npSafeDotDraw(lastElem)
+                end
+                stamped = 3
+            end
+            if stamped == 3 and not data.npRouteCalled and data.npDotNames ~= nil then
+                local byN = {}
+                for i = 1, 3 do
+                    local e = elems[i]
+                    if data.npDotNames[e] ~= nil and data.npDotOrder[e] ~= nil then
+                        byN[data.npDotOrder[e]] = data.npDotNames[e]
+                    end
+                end
+                if byN[1] ~= nil and byN[2] ~= nil and byN[3] ~= nil then
+                    data.npRouteCalled = true
+                    local wave1Done = false
+                    if data.npDone ~= nil then
+                        for eid, dn in pairs(data.npDone) do
+                            if dn then wave1Done = true break end
+                        end
+                    end
+                    local s2, s3 = speakName(byN[2]), speakName(byN[3])
+                    local msg
+                    if wave1Done then
+                        msg = "Move " .. movePhrase(s2) .. ", then " .. s3
+                    else
+                        msg = "Then " .. s2 .. ", then " .. s3
+                    end
+                    data.npRouteAt = Now()
+                    if AnyoneCore ~= nil and AnyoneCore.Shotcall ~= nil then
+                        AnyoneCore.Shotcall(msg, true, 8)
+                    end
+                end
+            end
+        end
         data.npPromote = function(elem)
             local sources = {}
             for i = 1, #data.npOrder do
@@ -298,6 +673,18 @@ if id == 47489 then
             if #sources > 0 then
                 data.npActiveElement = elem
                 data.npMoveUntil = Now() + 15000
+                data.npMoveCalled = data.npMoveCalled or {}
+                local n = data.npDotOrder ~= nil and data.npDotOrder[elem] or nil
+                -- skip the same-tick duplicate after the route call
+                local routeFresh = data.npRouteAt ~= nil and (Now() - data.npRouteAt) < 3000
+                if n ~= nil and n >= 2 and not data.npMoveCalled[elem]
+                    and data.npDotNames ~= nil and data.npDotNames[elem] ~= nil then
+                    data.npMoveCalled[elem] = true
+                    if not (n == 2 and routeFresh)
+                        and AnyoneCore ~= nil and AnyoneCore.Shotcall ~= nil then
+                        AnyoneCore.Shotcall("Move " .. movePhrase(speakName(data.npDotNames[elem])), true, 6)
+                    end
+                end
                 data.npIsSafe = function(px, pz)
                     for i = 1, #sources do
                         local dx = px - sources[i].x
@@ -330,6 +717,14 @@ if id == 47489 then
 
     -- Resolve channels determine order; flight order does not.
     data.npDrawMarker(a.entityID)
+    local pair, total = 0, 0
+    for eid, s in pairs(data.npSpots) do
+        total = total + 1
+        if s.element == element then pair = pair + 1 end
+    end
+    if pair >= 2 then data.npSafeDotDraw(element) end
+    -- all six down: re-solve early guesses, then pin
+    if total >= 6 then data.npRedrawDots() end
     self.used = true
 
 elseif id == 47494 or id == 47495 or id == 47496
@@ -352,12 +747,15 @@ elseif id == 47494 or id == 47495 or id == 47496
                     break
                 end
             end
-            if not remaining and data.npActiveElement == elem then
-                data.npIsSafe = nil
-                data.npActiveElement = nil
-                if data.npSafeShapes ~= nil then
-                    for i = 1, #data.npSafeShapes do Argus.deleteTimedShape(data.npSafeShapes[i]) end
-                    data.npSafeShapes = nil
+            if not remaining then
+                if data.npWipeDot ~= nil then data.npWipeDot(elem) end
+                if data.npActiveElement == elem then
+                    data.npIsSafe = nil
+                    data.npActiveElement = nil
+                    if data.npSafeShapes ~= nil then
+                        for i = 1, #data.npSafeShapes do Argus.deleteTimedShape(data.npSafeShapes[i]) end
+                        data.npSafeShapes = nil
+                    end
                 end
             end
         end
@@ -930,6 +1328,8 @@ local id = a.spellID
 if id == 47507 then
     -- Severed Dark Current has no boss-centered element copy.
     data.npDarkCurrentUntil = Now() + 45000
+    -- Safe dots solved at dive time included the boss copy; re-solve.
+    if data.npRedrawDots ~= nil then data.npRedrawDots() end
     self.used = true
     return
 end
@@ -947,6 +1347,16 @@ elseif id == 47494 or id == 47495 or id == 47496
     if data.npHeads ~= nil then element = data.npHeads[a.entityID] end
 end
 if element == nil then return end
+-- Stamp fallback: aura events can be lossy; the resolve channel is truth.
+if data.npStampDot ~= nil then
+    local n = 1
+    if data.npDotOrder ~= nil then
+        for _, v in pairs(data.npDotOrder) do
+            if v ~= nil then n = n + 1 end
+        end
+    end
+    if n <= 3 then data.npStampDot(element, n) end
+end
 data.npPromote(element)
 self.used = true
 ]==],
@@ -2339,12 +2749,22 @@ if ent == nil or ent.contentid ~= 14504 then return end
 
 -- Start a new set after the previous records expire.
 if data.npHeads == nil or (data.npLastTether ~= nil and TimeSince(data.npLastTether) > 60000) then
+    if data.npSafeDots ~= nil and data.npWipeDot ~= nil then
+        for elem in pairs(data.npSafeDots) do data.npWipeDot(elem) end
+    end
     data.npHeads = {}
     data.npDraws = {}
     data.npOrder = {}
     data.npSpots = {}
     data.npDone = {}
     data.npAnnounceOrder = {}
+    data.npSafeDots = {}
+    data.npDotOrder = {}
+    data.npDotNames = {}
+    data.npRouteCalled = nil
+    data.npMoveCalled = {}
+    data.npRouteAt = nil
+    data.npSetN = (data.npSetN or 0) + 1
 end
 data.npLastTether = Now()
 data.npHeads[src] = element
@@ -2609,7 +3029,7 @@ if kbSeq ~= nil and data.b1NoiseSchedCalled ~= active.id then
     data.b1NoiseSchedCalled = active.id
     if AnyoneCore ~= nil and AnyoneCore.Shotcall ~= nil then
         local par = (kbSeq % 2 == 1) and "1 and 3" or "2 and 4"
-        AnyoneCore.Shotcall("Knockback " .. (active.dx > 0 and "east" or "west") .. " after " .. par, true, 8)
+        AnyoneCore.Shotcall("Knockback " .. (active.dx > 0 and "east" or "west") .. " during " .. par, true, 8)
     end
 elseif kbSeq == nil and data.b1NoiseSchedCalled ~= active.id
     and data.b1NoiseBuffAt ~= nil and TimeSince(data.b1NoiseBuffAt) > 3000 then
@@ -3851,6 +4271,15 @@ local r = R[aura]
 -- been lost) - never trust it across sets.
 local ord = data.b2RingOrder and data.b2RingOrder[a.entityID]
 if ord ~= nil and ord.at ~= nil and TimeSince(ord.at) > 15000 then ord = nil end
+-- The idle-34 wipe is the r10 donut-first tell ONLY. On r15/r20 the
+-- real pose IDs (210/211) exist, so a 34-only record means the real
+-- pose event was lost - treat as no pose. A false donut call cuts an
+-- annulus from the overlay and paints the ring's center green over
+-- true chariot danger (live 2026-08-06 CS3).
+if ord ~= nil and ord.tell == "idle34" and r ~= 10 then
+    AnyoneCore.log("[B2 Cyclo] Ignoring idle-34 tell on r" .. r .. " ring (r10-only tell).", 5)
+    ord = nil
+end
 local firstShape = ord ~= nil and ord.first or nil
 if ord ~= nil and ord.tell == "idle34" then
     AnyoneCore.log("[B2 Cyclo] r10 donut tell (idle wipe at setup).", 5)
@@ -4001,37 +4430,10 @@ if data.b2RingHelpers == nil then
             data.b2NextText = AnyoneCore.addTimedWorldText(25000, "NEXT", { x = best.x, y = y + 1.6, z = best.z }, GUI:ColorConvertFloat4ToU32(1.0, 0.95, 0.4, 1.0), true, 1.3)
         end
     end
-    -- Every 3-ring set is 2 chariot-first + 1 donut-first: when the
-    -- other two rings are known, derive the third. Keeps rec.assumed
-    -- so hit-1 still validates loudly.
-    data.b2RingElim = function()
-        local recs = {}
-        for _, r2 in pairs(data.b2Rings) do
-            if r2.stage == 1 or r2.stage == 2 then recs[#recs + 1] = r2 end
-        end
-        if #recs ~= 3 then return end
-        local unknown, donuts, knowns = nil, 0, 0
-        for i = 1, #recs do
-            local r2 = recs[i]
-            if r2.assumed or r2.first == nil then
-                if unknown ~= nil then return end
-                unknown = r2
-            else
-                knowns = knowns + 1
-                if r2.first == "donut" then donuts = donuts + 1 end
-            end
-        end
-        if unknown == nil or knowns ~= 2 or unknown.stage ~= 1 then return end
-        local inferred = donuts == 0 and "donut" or "chariot"
-        if unknown.first ~= inferred then
-            unknown.first = inferred
-            unknown.second = inferred == "donut" and "chariot" or "donut"
-            data.b2RingDraw(unknown, unknown.first, 20000)
-            data.b2RingOverlay()
-            if data.b2RingNext ~= nil then data.b2RingNext() end
-            AnyoneCore.log("[B2 Cyclo] Order inferred by elimination: " .. inferred .. "-first.", 5)
-        end
-    end
+    -- Ring-composition elimination REMOVED: a live set with 1
+    -- chariot-first + 2 donut-first exists (2026-08-06 CS3), so the
+    -- "2 chariot + 1 donut" invariant does not hold. Unknown rings
+    -- stay on the factory assumption; hit 1 corrects.
     -- Build the shared safe overlay from all live rings.
     data.b2RingOverlay = function()
         if ArgusDrawsPlus == nil or ArgusDrawsPlus.getEnabled() ~= true
@@ -4161,7 +4563,6 @@ data.b2RingNext()
 if assumed then
     AnyoneCore.log("[B2 Cyclo] Pose unavailable; using default chariot-first order.", 5)
 end
-if data.b2RingElim ~= nil then data.b2RingElim() end
 
 -- Other actor state exposes ring size but not shape order.
 
@@ -4223,6 +4624,7 @@ end
 if not known then
     data.npAnnounceOrder[#data.npAnnounceOrder + 1] = element
     local n = #data.npAnnounceOrder
+    if data.npStampDot ~= nil then data.npStampDot(element, n) end
     if AnyoneCore ~= nil and AnyoneCore.addTimedWorldText ~= nil
         and AnyoneCore.removeTimedWorldText ~= nil then
         local label
@@ -5268,6 +5670,7 @@ if a.a2 == 3 then
                 end
                 if safe ~= nil then
                     AnyoneCore.Shotcall("Move counterclockwise, " .. safe, true, 7)
+                    data.idxOmniSafeCall = { e = safe, at = Now() }
                     data.idxOmniGuide(st, safe, "GO " .. safe)
                 end
             end
@@ -5280,6 +5683,7 @@ if a.a2 == 3 then
                     if AnyoneCore ~= nil and AnyoneCore.Shotcall ~= nil then
                         AnyoneCore.Shotcall("Move " .. hop.to .. " now", true, 7)
                     end
+                    data.idxOmniSafeCall = { e = hop.to, at = Now() }
                     data.idxOmniGuide(st, hop.to, "GO " .. hop.to, hop.endAng)
                     -- Preview the following hop.
                     local nxt = cl.plan[i + 1]
@@ -5289,6 +5693,21 @@ if a.a2 == 3 then
                             GUI:ColorConvertFloat4ToU32(0.3, 1.0, 0.4, 1.0), true, 1.5)
                     end
                 end
+            end
+        end
+        -- Flush a deferred Predict personal call (TTS + GO texts)
+        -- once no route moves remain - it then lands right after
+        -- the final move call.
+        if data.idxRingDefer ~= nil and data.idxRingGo ~= nil then
+            local rem = false
+            if cl.plan ~= nil then
+                for i = 1, #cl.plan do
+                    if (cl.plan[i].moveSlot or 0) > cl.boomN then rem = true end
+                end
+            end
+            if not rem then
+                data.idxRingGo(data.idxRingDefer)
+                data.idxRingDefer = nil
             end
         end
     end
@@ -5369,6 +5788,7 @@ if cl.riders ~= nil and AnyoneCore ~= nil and AnyoneCore.Shotcall ~= nil then
     end
     if n == 1 and safe ~= nil then
         AnyoneCore.Shotcall("Start " .. safe, true, 7)
+        data.idxOmniSafeCall = { e = safe, at = Now() }
         data.idxOmniGuide(st, safe, "START")
     end
 
@@ -5388,6 +5808,7 @@ if cl.v2 ~= true then
         if AnyoneCore ~= nil and AnyoneCore.Shotcall ~= nil then
             AnyoneCore.Shotcall("Start " .. startE, true, 7)
         end
+        data.idxOmniSafeCall = { e = startE, at = Now() }
         data.idxOmniGuide(st, startE, "START")
     elseif n == 5 then
         -- Infer the sixth ring from the two-per-element invariant.
@@ -5769,16 +6190,18 @@ else
     first = CIRCLE_FIRST[anim] and "chariot" or "donut"
 end
 data.b2RingOrder[a.entityID] = { first = first, at = Now(), tell = idle34 and "idle34" or "pose" }
--- Update an existing unknown ring when its tell arrives late.
+-- Update an existing unknown ring when its tell arrives late. The
+-- idle-34 tell only applies to r10 rings - on bigger rings a bare 34
+-- means the real pose event was lost, not donut-first.
 local rec = data.b2Rings ~= nil and data.b2Rings[a.entityID] or nil
-if rec ~= nil and rec.stage == 1 and (rec.first == nil or rec.assumed) then
+if rec ~= nil and rec.stage == 1 and (rec.first == nil or rec.assumed)
+    and not (idle34 and rec.r ~= 10) then
     rec.first = first
     rec.second = first == "donut" and "chariot" or "donut"
     rec.assumed = nil
     if data.b2RingDraw ~= nil then data.b2RingDraw(rec, rec.first, 12000) end
     if data.b2RingOverlay ~= nil then data.b2RingOverlay() end
     if data.b2RingNext ~= nil then data.b2RingNext() end
-    if data.b2RingElim ~= nil then data.b2RingElim() end
 end
 self.used = true
 ]==],
@@ -5787,6 +6210,11 @@ self.used = true
 							
 							{
 								"d4738a10-1f5c-4b6e-8a2d-30e1c5f7a900",
+								true,
+							},
+							
+							{
+								"1a2b3c4d-004f-4b2b-9c4f-b2c1c105a04f",
 								true,
 							},
 							
@@ -5817,6 +6245,18 @@ self.used = true
 						dequeueIfLuaFalse = true,
 						name = "North Horn",
 						uuid = "d4738a10-1f5c-4b6e-8a2d-30e1c5f7a900",
+						version = 3,
+					},
+				},
+				{
+					data = 
+					{
+						category = "Event",
+						eventArgOptionType = 2,
+						eventEntityContentID = 14825,
+						dequeueIfLuaFalse = true,
+						name = "Cycloswords Ring Entity",
+						uuid = "1a2b3c4d-004f-4b2b-9c4f-b2c1c105a04f",
 						version = 3,
 					},
 				},
@@ -5872,25 +6312,51 @@ if me == nil or me.id ~= a.entityID then
     self.used = true
     return
 end
-if AnyoneCore ~= nil and AnyoneCore.Shotcall ~= nil then
-    AnyoneCore.Shotcall("Go to " .. (elem == "LIGHTNING" and "Lightning" or (elem == "FIRE" and "Fire" or "Ice")), true, 8)
+-- Personal call + GO texts as one unit so the defer path moves both.
+if data.idxRingGo == nil then
+    data.idxRingGo = function(elem2)
+        if AnyoneCore ~= nil and AnyoneCore.Shotcall ~= nil then
+            local say = elem2 == "LIGHTNING" and "Lightning" or (elem2 == "FIRE" and "Fire" or "Ice")
+            -- Echo guard: the omni safe call just named this element -
+            -- confirm instead of repeating.
+            local sc = data.idxOmniSafeCall
+            local verb = (sc ~= nil and sc.e == elem2 and TimeSince(sc.at) < 8000) and "Stay " or "Go to "
+            AnyoneCore.Shotcall(verb .. say, true, 8)
+        end
+        -- Mark both ends of the target element axis.
+        local st2 = data.idxOmni
+        local h = st2 ~= nil and st2.dirs ~= nil and st2.dirs[elem2] or nil
+        if h ~= nil and AnyoneCore ~= nil and AnyoneCore.addTimedWorldText ~= nil then
+            local cx, cz, cy = 0.0, -628.0, -684.0
+            if data.idxRingGoTexts ~= nil and AnyoneCore.removeTimedWorldText ~= nil then
+                for i = 1, #data.idxRingGoTexts do AnyoneCore.removeTimedWorldText(data.idxRingGoTexts[i]) end
+            end
+            data.idxRingGoTexts = {}
+            for _, s in ipairs({ 1, -1 }) do
+                data.idxRingGoTexts[#data.idxRingGoTexts + 1] = AnyoneCore.addTimedWorldText(12000, "GO " .. elem2,
+                    { x = cx + s * 13 * math.sin(h), y = cy + 1.6, z = cz + s * 13 * math.cos(h) },
+                    GUI:ColorConvertFloat4ToU32(0.3, 1.0, 0.4, 1.0), true, 1.6)
+            end
+        elseif h == nil and AnyoneCore ~= nil and AnyoneCore.log ~= nil then
+            AnyoneCore.log("[IDX Predict] Pointer axis unavailable; using callout only.", 5)
+        end
+    end
 end
--- Mark both ends of the target element axis.
-local st = data.idxOmni
-local h = st ~= nil and st.dirs ~= nil and st.dirs[elem] or nil
-if h ~= nil and AnyoneCore ~= nil and AnyoneCore.addTimedWorldText ~= nil then
-    local cx, cz, cy = 0.0, -628.0, -684.0
-    if data.idxRingGoTexts ~= nil and AnyoneCore.removeTimedWorldText ~= nil then
-        for i = 1, #data.idxRingGoTexts do AnyoneCore.removeTimedWorldText(data.idxRingGoTexts[i]) end
+-- Predict marker waves can interleave an omni v1 route (wave-3
+-- marks land ~1s before the cluster's last "Move now" call). While
+-- route moves are still pending, defer call AND texts - the omni
+-- boom handler flushes both right after its final move call.
+local defer = false
+local ocl = data.idxOmni ~= nil and data.idxOmni.cluster or nil
+if ocl ~= nil and ocl.plan ~= nil and data.idxOmniAt ~= nil and TimeSince(data.idxOmniAt) < 30000 then
+    for i = 1, #ocl.plan do
+        if (ocl.plan[i].moveSlot or 0) > (ocl.boomN or 0) then defer = true end
     end
-    data.idxRingGoTexts = {}
-    for _, s in ipairs({ 1, -1 }) do
-        data.idxRingGoTexts[#data.idxRingGoTexts + 1] = AnyoneCore.addTimedWorldText(12000, "GO " .. elem,
-            { x = cx + s * 13 * math.sin(h), y = cy + 1.6, z = cz + s * 13 * math.cos(h) },
-            GUI:ColorConvertFloat4ToU32(0.3, 1.0, 0.4, 1.0), true, 1.6)
-    end
-elseif h == nil and AnyoneCore ~= nil and AnyoneCore.log ~= nil then
-    AnyoneCore.log("[IDX Predict] Pointer axis unavailable; using callout only.", 5)
+end
+if defer then
+    data.idxRingDefer = elem
+else
+    data.idxRingGo(elem)
 end
 self.used = true
 ]==],
