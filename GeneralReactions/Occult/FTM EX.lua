@@ -14,7 +14,7 @@ local tbl =
 			eventType = 2,
 			loop = false,
 			mechanicTime = 0,
-			name = "[FTM] ===v398===",
+			name = "[FTM] ===v412===",
 			throttleTime = 0,
 			timeRange = false,
 			timelineIndex = 0,
@@ -206,21 +206,13 @@ if id == 47489 then
             if elem == "thunder" then return "LTG" end
             return "FIRE"
         end
-        local SPELL = { ["1"] = "One", ["2"] = "Two", ["3"] = "Three", ["4"] = "Four" }
-        local CFULL = { N = "north", NE = "northeast", E = "east", SE = "southeast",
-                        S = "south", SW = "southwest", W = "west", NW = "northwest", MID = "middle" }
+        -- speech via data.lib; raw names if it is missing
         local function speakName(name)
-            if name == nil then return "unknown" end
-            local base, suff = string.match(name, "^(.+)-(%u+)$")
-            if suff == "OUT" then return "outside " .. (SPELL[base] or CFULL[base] or base) end
-            if suff == "IN" then return "inside " .. (SPELL[base] or CFULL[base] or base) end
-            if name == "B" or name == "D" then return "at " .. name end
-            if SPELL[name] ~= nil then return "under " .. SPELL[name] end
-            if name == "A" or name == "C" then return "under " .. name end
-            return CFULL[name] or name
+            if data.lib ~= nil then return data.lib.speakName(name) end
+            return name or "unknown"
         end
         local function movePhrase(p)
-            if string.sub(p, 1, 3) == "at " then return "to " .. string.sub(p, 4) end
+            if data.lib ~= nil then return data.lib.movePhrase(p) end
             return p
         end
         local function elemSources(elem)
@@ -280,25 +272,9 @@ if id == 47489 then
         end
         -- names may come from live marks; positions never do
         local function liveName(angDeg)
-            if Argus ~= nil and Argus.getWaymarkInfo ~= nil then
-                local names = { "A", "B", "C", "D", "1", "2", "3", "4" }
-                local dirAng = math.rad(angDeg)
-                local bestName, bestDd = nil, math.rad(35)
-                for wid = 1, 8 do
-                    local mx, my, mz, active = Argus.getWaymarkInfo(wid)
-                    if active == true and mx ~= nil then
-                        local dx, dz = mx - center.x, mz - center.z
-                        local wr = math.sqrt(dx * dx + dz * dz)
-                        if wr > 5 and wr < 35 then
-                            local mAng = math.atan2(dx, -dz)
-                            local dd = math.abs((mAng - dirAng + math.pi) % (2 * math.pi) - math.pi)
-                            if dd < bestDd then bestName, bestDd = names[wid], dd end
-                        end
-                    end
-                end
-                if bestName ~= nil then return bestName end
-            end
-            return nil
+            if data.lib == nil then return nil end
+            local a = math.rad(angDeg)
+            return data.lib.markNearDir(center.x, center.z, math.sin(a), -math.cos(a), math.rad(35), 35)
         end
         local function baseName(angDeg)
             return liveName(angDeg) or MARKS[angDeg]
@@ -2849,6 +2825,123 @@ self.used = true
 					{
 						aType = "Lua",
 						actionLua = [==[
+if data.lib ~= nil then return end
+local L = {}
+
+L.MARK_NAMES = { "A", "B", "C", "D", "1", "2", "3", "4" }
+L.MARK_TTS = { "A", "B", "C", "D", "One", "Two", "Three", "Four" }
+L.SPEAK_NUM = { ["1"] = "One", ["2"] = "Two", ["3"] = "Three", ["4"] = "Four" }
+L.COMPASS = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" }
+L.COMPASS_FULL = { N = "north", NE = "northeast", E = "east", SE = "southeast",
+                   S = "south", SW = "southwest", W = "west", NW = "northwest", MID = "middle" }
+
+-- Compass name for a world direction vector (north = -z, east = +x).
+function L.compassFromDir(dx, dz, short)
+    local ang = math.deg(math.atan2(dx, -dz)) % 360
+    local code = L.COMPASS[math.floor((ang + 22.5) / 45) % 8 + 1]
+    if short then return code end
+    return L.COMPASS_FULL[code]
+end
+
+-- Nearest placed waymark within tolRad of a direction from (cx, cz).
+-- id->name mapping assumed; returns name, mx, mz or nil.
+function L.markNearDir(cx, cz, dirx, dirz, tolRad, maxR, tts)
+    if Argus == nil or Argus.getWaymarkInfo == nil then return nil end
+    local dl = math.sqrt(dirx * dirx + dirz * dirz)
+    if dl < 0.001 then return nil end
+    local names = tts and L.MARK_TTS or L.MARK_NAMES
+    local bestN, bestX, bestZ, bestD
+    for wid = 1, 8 do
+        local mx, my, mz, active = Argus.getWaymarkInfo(wid)
+        if active == true and mx ~= nil then
+            local dx, dz = mx - cx, mz - cz
+            local wl = math.sqrt(dx * dx + dz * dz)
+            if wl > 5 and wl < (maxR or 60) then
+                local cosv = (dx * dirx + dz * dirz) / (wl * dl)
+                if cosv > 1 then cosv = 1 elseif cosv < -1 then cosv = -1 end
+                local dd = math.acos(cosv)
+                if dd < tolRad and (bestD == nil or dd < bestD) then
+                    bestN, bestX, bestZ, bestD = names[wid], mx, mz, dd
+                end
+            end
+        end
+    end
+    return bestN, bestX, bestZ
+end
+
+-- Marker-vocab name to TTS phrase ("4-OUT" -> "outside Four").
+function L.speakName(name)
+    if name == nil then return "unknown" end
+    local base, suff = string.match(name, "^(.+)-(%u+)$")
+    if suff == "OUT" then return "outside " .. (L.SPEAK_NUM[base] or L.COMPASS_FULL[base] or base) end
+    if suff == "IN" then return "inside " .. (L.SPEAK_NUM[base] or L.COMPASS_FULL[base] or base) end
+    if name == "B" or name == "D" then return "at " .. name end
+    if L.SPEAK_NUM[name] ~= nil then return "under " .. L.SPEAK_NUM[name] end
+    if name == "A" or name == "C" then return "under " .. name end
+    return L.COMPASS_FULL[name] or name
+end
+
+function L.movePhrase(p)
+    if string.sub(p, 1, 3) == "at " then return "to " .. string.sub(p, 4) end
+    return p
+end
+
+-- Standard KB guide frame: "KB" text on the player, shrinking ring
+-- (4s, red at 2.6s), flat arrow along heading. st = caller-owned
+-- table for text dedupe; hitAt may be nil (arrow only).
+function L.kbGuide(st, hitAt, heading, kbLen, noText)
+    local player = TensorCore.mGetPlayer()
+    if player == nil or player.pos == nil then return false end
+    local px, py, pz = player.pos.x, player.pos.y, player.pos.z
+    local rem = hitAt ~= nil and (hitAt - Now()) or nil
+    if rem ~= nil and rem > -200 then
+        if not noText and st.textFor ~= hitAt and rem > 0 and AnyoneCore ~= nil
+            and AnyoneCore.addTimedWorldTextOnEnt ~= nil then
+            st.textFor = hitAt
+            AnyoneCore.addTimedWorldTextOnEnt(rem + 300, "KB", player.id,
+                GUI:ColorConvertFloat4ToU32(1, 1, 1, 1), true, 1.5, 2.2)
+        end
+        if rem > 0 and rem <= 4000 then
+            local ring = TensorCore.getStaticFlatDrawer(rem <= 2600 and 2214592767 or 2214657792)
+            if ring ~= nil then
+                ring:addCircle(px, py + 0.05, pz, 0.5 + 3.5 * rem / 4000)
+            end
+        end
+    end
+    local imminent = rem ~= nil and rem <= 2600
+    local drawer = TensorCore.getStaticFlatDrawer(imminent and 2214592767 or 2214657792)
+    if drawer == nil then return false end
+    drawer:addArrow(px, py + 0.05, pz, heading, kbLen, 0.25, nil, nil, true, false, 0)
+    return true
+end
+
+data.lib = L
+self.used = true
+]==],
+						conditions =
+						{
+							
+							{
+								"d4738a10-1f5c-4b6e-8a2d-30e1c5f7a900",
+								true,
+							},
+							
+							{
+								"1a2b3c4d-0051-4b2b-9c51-b2c1c105a051",
+								true,
+							},
+						},
+						name = "FTM - Lib",
+						uuid = "1a2b3c4d-0052-4b2b-9c52-b2c1c105a052",
+						version = 2.1,
+					},
+				},
+				
+				{
+					data =
+					{
+						aType = "Lua",
+						actionLua = [==[
 local list = data.npFgVolleyList
 if list == nil or data.npFgCenter == nil then return end
 local player = TensorCore.mGetPlayer()
@@ -3004,7 +3097,6 @@ if data.b1NoiseCalled ~= active.id then
     data.b1NoiseBuffAt = Now()
 end
 local KB = 10
-local px, py, pz = player.pos.x, player.pos.y, player.pos.z
 -- Each Noise resolves after its matching head attack. Hit times are
 -- PREDICTED from the helper channels (~10s lead) with their global
 -- blaze numbers attached.
@@ -3039,33 +3131,14 @@ elseif kbSeq == nil and data.b1NoiseSchedCalled ~= active.id
         AnyoneCore.Shotcall(active.call, true, 8)
     end
 end
--- Use a shrinking ring because label countdowns use a different clock.
-if kbAt ~= nil then
-    local rem = kbAt - Now()
-    if rem > -200 then
-        if data.b1NoiseTextFor ~= kbAt and AnyoneCore ~= nil
-            and AnyoneCore.addTimedWorldTextOnEnt ~= nil then
-            data.b1NoiseTextFor = kbAt
-            AnyoneCore.addTimedWorldTextOnEnt(rem + 300, "KB", player.id,
-                GUI:ColorConvertFloat4ToU32(1, 1, 1, 1), true, 1.5, 2.2)
-        end
-        if rem > 0 and rem <= 4000 then
-            local ring = TensorCore.getStaticFlatDrawer(rem <= 2600 and 2214592767 or 2214657792)
-            if ring ~= nil then
-                ring:addCircle(px, py + 0.05, pz, 0.5 + 3.5 * rem / 4000)
-            end
-        end
-    end
-end
 -- No execution TTS: the shrinking ring, red arrow flash, and KB
 -- text carry the timing.
-local imminent = kbAt ~= nil and (kbAt - Now()) <= 2600
--- Turn red shortly before the knockback resolves.
-local drawer = TensorCore.getStaticFlatDrawer(imminent and 2214592767 or 2214657792)
-if drawer == nil then return end
+if data.lib == nil then return end
+data.b1NoiseGuideSt = data.b1NoiseGuideSt or {}
 local h = active.dx > 0 and (math.pi / 2) or (-math.pi / 2)
-drawer:addArrow(px, py + 0.05, pz, h, KB, 0.25, nil, nil, true, false, 0)
-self.used = true
+if data.lib.kbGuide(data.b1NoiseGuideSt, kbAt, h, KB) then
+    self.used = true
+end
 ]==],
 						conditions =
 						{
@@ -3145,34 +3218,13 @@ end
 local rem = active.hitAt - Now()
 if rem > 9000 then return end
 
--- Use a shrinking ring because label countdowns use a different clock.
-if data.b2LlKbTextFor ~= active.hitAt and AnyoneCore ~= nil
-    and AnyoneCore.addTimedWorldTextOnEnt ~= nil and rem > 0 then
-    data.b2LlKbTextFor = active.hitAt
-    AnyoneCore.addTimedWorldTextOnEnt(rem + 300, "KB", player.id,
-        GUI:ColorConvertFloat4ToU32(1, 1, 1, 1), true, 1.5, 2.2)
-end
-
-
-
--- Point from the player toward the projected landing position.
-local KB = 25
-local px, py, pz = player.pos.x, player.pos.y, player.pos.z
-local dx, dz = px - active.x, pz - active.z
+if data.lib == nil then return end
+local dx, dz = player.pos.x - active.x, player.pos.z - active.z
 if dx * dx + dz * dz < 0.04 then dz = -1 end
-local h = math.atan2(dx, dz)
-local imminent = rem <= 2600
--- The shrinking ring acts as the countdown.
-if rem > 0 and rem <= 4000 then
-    local ring = TensorCore.getStaticFlatDrawer(imminent and 2214592767 or 2214657792)
-    if ring ~= nil then
-        ring:addCircle(px, py + 0.05, pz, 0.5 + 3.5 * rem / 4000)
-    end
+data.b2LlGuideSt = data.b2LlGuideSt or {}
+if data.lib.kbGuide(data.b2LlGuideSt, active.hitAt, math.atan2(dx, dz), 25) then
+    self.used = true
 end
-local drawer = TensorCore.getStaticFlatDrawer(imminent and 2214592767 or 2214657792)
-if drawer == nil then return end
-drawer:addArrow(px, py + 0.05, pz, h, KB, 0.25, nil, nil, true, false, 0)
-self.used = true
 ]==],
 						conditions =
 						{
@@ -3211,26 +3263,19 @@ for i = 1, #data.idxKbSrcs do
 end
 local rem = data.idxKbAt - Now()
 if rem < -300 then return end
-local imminent = rem <= 2600
-if imminent and data.idxKbCalled ~= data.idxKbAt then
+if rem <= 2600 and data.idxKbCalled ~= data.idxKbAt then
     data.idxKbCalled = data.idxKbAt
     if AnyoneCore ~= nil and AnyoneCore.Shotcall ~= nil then
         AnyoneCore.Shotcall("Knockback now", true, 3)
     end
 end
-if rem > 0 and rem <= 4000 then
-    local ring = TensorCore.getStaticFlatDrawer(imminent and 2214592767 or 2214657792)
-    if ring ~= nil then
-        ring:addCircle(px, py + 0.05, pz, 0.5 + 3.5 * rem / 4000)
-    end
-end
+if data.lib == nil then return end
 local dx, dz = px - best.x, pz - best.z
 if dx * dx + dz * dz < 0.04 then dz = -1 end
-local h = math.atan2(dx, dz)
-local drawer = TensorCore.getStaticFlatDrawer(imminent and 2214592767 or 2214657792)
-if drawer == nil then return end
-drawer:addArrow(px, py + 0.05, pz, h, 10, 0.25, nil, nil, true, false, 0)
-self.used = true
+data.idxKbGuideSt = data.idxKbGuideSt or {}
+if data.lib.kbGuide(data.idxKbGuideSt, data.idxKbAt, math.atan2(dx, dz), 10, true) then
+    self.used = true
+end
 ]==],
 						conditions =
 						{
@@ -3267,6 +3312,17 @@ self.used = true
 						dequeueIfLuaFalse = true,
 						name = "North Horn",
 						uuid = "d4738a10-1f5c-4b6e-8a2d-30e1c5f7a900",
+						version = 3,
+					},
+				},
+				{
+					data = 
+					{
+						category = "Lua",
+						conditionLua = "return data.lib == nil",
+						dequeueIfLuaFalse = true,
+						name = "Lib Missing",
+						uuid = "1a2b3c4d-0051-4b2b-9c51-b2c1c105a051",
 						version = 3,
 					},
 				},
@@ -3893,13 +3949,33 @@ local inner = L - 5
 local red = TensorCore.getStaticDrawer(GUI:ColorConvertFloat4ToU32(1.0, 0.3, 0.15, 0.45), 1)
 red:addTimedDonutCone(hitMs, x, y, z, inner, L, math.rad(90), h, 0)
 
--- Preview the next quarter with an outline.
+-- Preview the next quarter with an outline. 754/755 = the off-grid
+-- terminal turnabout arc; nothing follows it.
+-- 751 rotates a per-instance direction - learn the step from the
+-- chain itself; 750/752 table values are arc-1 priors only.
 local STEP = { [750] = -math.pi / 2, [752] = math.pi / 2 }
-local step = STEP[a.aoeType or -1]
-if step ~= nil then
-    local thin = TensorCore.getStaticDrawer(GUI:ColorConvertFloat4ToU32(1.0, 0.6, 0.2, 0.30), 2)
-    thin:addTimedDonutCone(4400, x, y, z, inner, L, math.rad(90), h + step, 0)
-elseif a.aoeType ~= 755 and AnyoneCore ~= nil and AnyoneCore.log ~= nil then
+local TERMINAL = { [754] = true, [755] = true }
+local t10 = a.aoeType or -1
+if STEP[t10] ~= nil or t10 == 751 then
+    data.b2SweepLast = data.b2SweepLast or {}
+    local prev = data.b2SweepLast[a.entityID or -1]
+    local step
+    -- Negative TimeSince = replay scrubbed backwards; distrust it.
+    if prev ~= nil and prev.type == t10 and TimeSince(prev.at) >= 0 and TimeSince(prev.at) < 6000 then
+        step = (h - prev.h + math.pi) % (2 * math.pi) - math.pi
+        local tbl = STEP[t10]
+        if tbl ~= nil and (step - tbl > 0.2 or step - tbl < -0.2) then
+            AnyoneCore.log("[B2 Sweeps] Type " .. tostring(t10) .. " observed step contradicts table; using observed.", 5)
+        end
+    else
+        step = STEP[t10]
+    end
+    if step ~= nil then
+        local thin = TensorCore.getStaticDrawer(GUI:ColorConvertFloat4ToU32(1.0, 0.6, 0.2, 0.30), 2)
+        thin:addTimedDonutCone(4400, x, y, z, inner, L, math.rad(90), h + step, 0)
+    end
+    data.b2SweepLast[a.entityID or -1] = { h = h, at = Now(), type = t10 }
+elseif not TERMINAL[t10] and AnyoneCore ~= nil and AnyoneCore.log ~= nil then
     data.b2SweepWarned = data.b2SweepWarned or {}
     if not data.b2SweepWarned[a.aoeType or -1] then
         data.b2SweepWarned[a.aoeType or -1] = true
@@ -4283,6 +4359,28 @@ end
 local firstShape = ord ~= nil and ord.first or nil
 if ord ~= nil and ord.tell == "idle34" then
     AnyoneCore.log("[B2 Cyclo] r10 donut tell (idle wipe at setup).", 5)
+end
+-- Pose is persistent state on the entity (ent.action); events are
+-- lossy, the poll is not. Size in the pose ID must match the aura.
+local POSE = { [3604] = { r = 10, f = "chariot" }, [5896] = { r = 15, f = "chariot" },
+               [6847] = { r = 20, f = "chariot" }, [210] = { r = 15, f = "donut" },
+               [211] = { r = 20, f = "donut" } }
+local pp = POSE[ent.action] or POSE[ent.lastaction]
+local polled
+if pp ~= nil then
+    if pp.r == r then
+        polled = pp.f
+    else
+        AnyoneCore.log("[B2 Cyclo] Pose poll size mismatch (pose r" .. pp.r .. " on r" .. r .. " ring) - poll ignored.", 5)
+    end
+elseif ent.action == 34 and r == 10 then
+    polled = "donut"
+end
+if polled ~= nil then
+    if firstShape ~= nil and firstShape ~= polled then
+        AnyoneCore.log("[B2 Cyclo] Pose poll (" .. polled .. ") overrides event record (" .. firstShape .. ").", 5)
+    end
+    firstShape = polled
 end
 local donutFirst = firstShape == "donut"
 local p = ent.pos
@@ -5393,27 +5491,17 @@ pre[#pre + 1] = cyan:addTimedCenteredRect(12000, cx, py, cz, 60, 20, a4)
 local R = 16
 local function axisEnd(ang, sign)
     local dirAng = sign > 0 and ang or (ang + math.pi)
-    local ex, ez = cx + R * math.sin(dirAng), cz + R * math.cos(dirAng)
+    local dirx, dirz = math.sin(dirAng), math.cos(dirAng)
+    local ex, ez = cx + R * dirx, cz + R * dirz
     local name
-    if Argus ~= nil and Argus.getWaymarkInfo ~= nil then
-        local names = { "A", "B", "C", "D", "One", "Two", "Three", "Four" }
-        for id = 1, 8 do
-            local mx, my, mz, active = Argus.getWaymarkInfo(id)
-            if active == true and mx ~= nil then
-                local mAng = math.atan2(mx - cx, mz - cz)
-                local dd = math.abs((mAng - dirAng + math.pi) % (2 * math.pi) - math.pi)
-                if dd < math.rad(15) then
-                    ex, ez, name = mx, mz, names[id]
-                    break
-                end
-            end
-        end
+    if data.lib ~= nil then
+        local n, mx, mz = data.lib.markNearDir(cx, cz, dirx, dirz, math.rad(15), 60, true)
+        if n ~= nil then name, ex, ez = n, mx, mz end
     end
-    if name == nil then
-        local dirs = { "south", "southeast", "east", "northeast", "north", "northwest", "west", "southwest" }
-        local oct = (math.floor(dirAng / (math.pi / 4) + 0.5)) % 8 + 1
-        name = dirs[oct]
+    if name == nil and data.lib ~= nil then
+        name = data.lib.compassFromDir(dirx, dirz)
     end
+    if name == nil then name = "unknown" end
     return { x = ex, z = ez, name = name }
 end
 -- Draw both symmetric routes and call the nearest one.
@@ -6016,27 +6104,17 @@ pre[#pre + 1] = cyan:addTimedCenteredRect(12000, cx, py, cz, 60, 20, a4)
 local R = 16
 local function axisEnd(ang, sign)
     local dirAng = sign > 0 and ang or (ang + math.pi)
-    local ex, ez = cx + R * math.sin(dirAng), cz + R * math.cos(dirAng)
+    local dirx, dirz = math.sin(dirAng), math.cos(dirAng)
+    local ex, ez = cx + R * dirx, cz + R * dirz
     local name
-    if Argus ~= nil and Argus.getWaymarkInfo ~= nil then
-        local names = { "A", "B", "C", "D", "One", "Two", "Three", "Four" }
-        for id = 1, 8 do
-            local mx, my, mz, active = Argus.getWaymarkInfo(id)
-            if active == true and mx ~= nil then
-                local mAng = math.atan2(mx - cx, mz - cz)
-                local dd = math.abs((mAng - dirAng + math.pi) % (2 * math.pi) - math.pi)
-                if dd < math.rad(15) then
-                    ex, ez, name = mx, mz, names[id]
-                    break
-                end
-            end
-        end
+    if data.lib ~= nil then
+        local n, mx, mz = data.lib.markNearDir(cx, cz, dirx, dirz, math.rad(15), 60, true)
+        if n ~= nil then name, ex, ez = n, mx, mz end
     end
-    if name == nil then
-        local dirs = { "south", "southeast", "east", "northeast", "north", "northwest", "west", "southwest" }
-        local oct = (math.floor(dirAng / (math.pi / 4) + 0.5)) % 8 + 1
-        name = dirs[oct]
+    if name == nil and data.lib ~= nil then
+        name = data.lib.compassFromDir(dirx, dirz)
     end
+    if name == nil then name = "unknown" end
     return { x = ex, z = ez, name = name }
 end
 -- Draw both symmetric routes and call the nearest one.
